@@ -6,7 +6,7 @@ class Vk_api:
 
     def __init__(self):
         # token agpu bot
-        self.token = ()
+        self.token = ('')
         self.v = '5.80'
         self.params = {'access_token': self.token, 'v': self.v}
 
