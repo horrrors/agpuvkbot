@@ -79,4 +79,4 @@ unregchanges = 'Вы отписались от изменений :('
 reg = 'Вы зарегистрированы!'
 
 if __name__ == '__main__':
-    print(path)
+    pass
