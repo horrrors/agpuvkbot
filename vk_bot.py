@@ -10,6 +10,7 @@ from datetime import datetime, date
 from datetime import timedelta
 import copy
 import traceback
+from requests.packages.urllib3.exceptions import ProtocolError
 
 
 class Bot:
@@ -24,18 +25,29 @@ class Bot:
                     '{}&SearchString={}&Type={}&WeekId={}')
         self.keyboard = {}
 
+    def execute(self, str, arg=None, type=None):
+        """Инкапсулирует работу с базой данных"""
+        cur = con.cursor()
+
+        cur.execute(str, arg) if arg else cur.execute(str)
+
+        if str.startswith('INSERT') or str.startswith('UPDATE'):
+            con.commit()
+            return
+
+        return cur.fetchall() if type else cur.fetchone()
+
     def get_cur_date(self):
         """Получение значения текущей недели,
            а так же обновление его при необходимости"""
-        cur = con.cursor()
-        cur.execute("SELECT bddata,number FROM dates WHERE name='bddatanow'")
-        data, number = cur.fetchone()
+        data, number = self.execute("SELECT bddata,number FROM dates "
+                                    "WHERE name='bddatanow'")
         delta = datetime.now().date() - data
         if delta.days >= 7:
+            data = data + timedelta(days=7)
             number += 1
-            cur.execute("UPDATE dates SET number=(%s),bddata=(%s) "
-                        "WHERE name='bddatanow'", (number, data))
-            con.commit()
+            self.execute("UPDATE dates SET number=(%s),bddata=(%s) "
+                         "WHERE name='bddatanow'", (number, data))
         return int(number)
 
     def driver_get_screen(self, url):
@@ -52,29 +64,24 @@ class Bot:
         он относится"""
         self.driver_get_screen(self.url.format(id, group, type,
                                                str(self.get_cur_date())))
-        cur = con.cursor()
-        cur.execute("UPDATE bytes SET byte=(%s) WHERE name=(%s)",
-                    (psycopg2.Binary(open('group.png', 'rb').read()),
-                     group))
-        con.commit()
+        self.execute("UPDATE bytes SET byte=(%s) WHERE name=(%s)",
+                     (psycopg2.Binary(open('group.png', 'rb').read()),
+                      group))
 
     def is_reg(self, id):
         """Проверка пользователя на регистрацию"""
-        cur = con.cursor()
-        cur.execute("SELECT id from rassilka where id=%s", (str(id),))
-        return True if cur.fetchone() else False
+        return True if self.execute("SELECT id from rassilka where id=%s",
+                                    (str(id),)) else False
 
     def is_dispatch(self, id):
         """Проверка пользователя на рассылку"""
-        cur = con.cursor()
-        cur.execute("SELECT dispatch from rassilka where id=(%s)", (id,))
-        return eval(cur.fetchone()[-1])
+        return eval(self.execute("SELECT dispatch from rassilka where id=(%s)",
+                                 (id,))[-1])
 
     def is_changes(self, id):
         """Проверка пользователя """
-        cur = con.cursor()
-        cur.execute("SELECT changes from rassilka where id=(%s)", (id,))
-        return eval(cur.fetchone()[-1])
+        return eval(self.execute("SELECT changes from rassilka where id=(%s)",
+                                 (id,))[-1])
 
     def make_keyboard(self, id, suggest=None):
         """Конструирует клавиатуру исходя из проверок,
@@ -114,10 +121,10 @@ class Bot:
                 message = split[0].rstrip()
                 data += int(split[1])
 
-            cur = con.cursor()
-            cur.execute("SELECT * FROM ids WHERE name=%s", (message,))
             username = self.vk.getUser(id)
-            group, grpid, type = cur.fetchone()
+            group, grpid, type = self.execute("SELECT * FROM ids "
+                                              "WHERE name=%s",
+                                              (message,))
             self.driver_get_screen(self.url.format(id, grpid, type,
                                                    str(data)))
             self.vk.send(user_id=id,
@@ -129,19 +136,18 @@ class Bot:
 
     def make_error(self, id, message):
         """Пытается искать совпадения и выдает найденные предложения"""
-        cur = con.cursor()
-        cur.execute("SELECT name from ids WHERE name like %s",
-                    ('%{}%'.format(message),))
-        suggest = [x[0] for x in cur.fetchall()[:10]]
+        source = self.execute("SELECT name from ids WHERE name like %s",
+                              ('%{}%'.format(message),), 'fetchall')
+        suggest = [x[0] for x in source[:10]]
         self.vk.send(user_id=id, message=random.choice(sorry),
                      keyboard=self.make_keyboard(id, suggest))
 
     def sendfrombytes(self, id, message):
         """Восстанавливает из бинарника скриншот и отправляет его"""
         try:
-            cur = con.cursor()
-            cur.execute("SELECT * from bytes WHERE name=%s", (message,))
-            open('bytepic.png', 'wb').write(cur.fetchone()[1])
+            source = self.execute("SELECT * from bytes WHERE name=%s",
+                                  (message,))
+            open('bytepic.png', 'wb').write(source[1])
             username = self.vk.getUser(id)
             self.vk.send(user_id=id,
                          message=random.choice(complete).format(username),
@@ -154,66 +160,54 @@ class Bot:
     def screeneveryday(self):
         """Сверяет дату и при необходимости переводит число
            и обновляет скриншоты"""
-        cur = con.cursor()
-        cur.execute("SELECT bddata from dates where"
-                    " name='bddataeveryday'")
-        row = cur.fetchone()
-        data = row[0]
+        data = self.execute("SELECT bddata from dates where"
+                            " name=%s", ('bddataeveryday',))[0]
 
         delta = datetime.now().date() - data
 
         if delta.days >= 1:
             data = data + timedelta(days=1)
-            cur.execute("UPDATE dates set bddata=(%s) WHERE name=(%s)",
-                        (data, 'bddataeveryday'))
-            con.commit()
+            self.execute("UPDATE dates set bddata=(%s) WHERE name=(%s)",
+                         (data, 'bddataeveryday'))
 
-            cur = con.cursor()
-            cur.execute("SELECT * FROM ids")
-            for row in cur.fetchall():
+            for row in self.execute("SELECT * FROM ids", type='fetchall'):
                 self.makescreen(*row)
 
     def send_rassilka(self):
         """Отправляет каждую субботу рассылку"""
-        cur = con.cursor()
-        cur.execute("SELECT bddata FROM dates WHERE name=%s",
-                    ('bddatarassilka',))
-        data = cur.fetchone()[-1]
+        data = self.execute("SELECT bddata FROM dates WHERE name=%s",
+                            ('bddatarassilka',))[-1]
         delta = datetime.now().date() - data
 
         if delta.days >= 7:
             data = data + timedelta(days=7)
-            cur.execute("UPDATE dates SET bddata=(%s) WHERE name=(%s)",
-                        data, 'bddatarassilka')
-            con.commit()
+            self.execute("UPDATE dates SET bddata=(%s) WHERE name=(%s)",
+                         (data, 'bddatarassilka'))
 
-            cur = con.cursor()
-            cur.execute("SELECT id, grupa FROM rassilka "
-                        "WHERE dispatch='True'")
-            for row in cur.fetchall():
+            for row in self.execute("SELECT id, grupa FROM rassilka "
+                                    "WHERE dispatch='True'", type='fetchall'):
                 self.getsend(*row)
 
     def get_rasp(self, id):
         """Обработка кнопки мое расписание"""
-        cur = con.cursor()
-        cur.execute("SELECT grupa from rassilka where id=%s", (id,))
-        message = cur.fetchone()[-1]
+        self.execute("SELECT grupa from rassilka where id=%s", (id,))
+        message = self.execute("SELECT grupa from rassilka where id=%s",
+                               (id,))[-1]
         self.sendfrombytes(id, message)
 
     def get_prev_next(self, id, message):
         """Обработка кнопок следующая и предыдущая"""
-        if message.find('следующая'):
+        if message.find('следующая') != -1:
             data = self.get_cur_date() + 1
         else:
             data = self.get_cur_date() - 1
 
-        cur = con.cursor()
-        cur.execute("SELECT grupa from rassilka where id=%s", (id,))
-        message = cur.fetchone()[-1]
-        cur = con.cursor()
-        cur.execute("SELECT * FROM ids WHERE name=%s", (message,))
+        message = self.execute("SELECT grupa from rassilka where id=%s",
+                               (id,))[-1]
+
         username = self.vk.getUser(id)
-        group, grpid, type = cur.fetchone()
+        group, grpid, type = self.execute("SELECT * FROM ids WHERE name=%s",
+                                          (message,))
         self.driver_get_screen(self.url.format(id, grpid, type, str(data)))
         self.vk.send(user_id=id,
                      message=random.choice(complete).format(username),
@@ -223,34 +217,26 @@ class Bot:
     def get_registration(self, id, message):
         """Производит регистрацию пользователя в базе"""
         message = message.split()[-1].capitalize()
-        cur = con.cursor()
-        cur.execute("INSERT INTO rassilka(id, grupa) VALUES(%s,%s)",
-                    (str(id), message))
-        con.commit()
+        self.execute("INSERT INTO rassilka(id, grupa) VALUES(%s,%s)",
+                     (str(id), message))
         self.vk.send(user_id=id, message=reg,
                      keyboard=self.make_keyboard(id))
 
     def get_dispatch(self, id):
         """Отвечает за обработку кнопки подключение рассылки"""
-        cur = con.cursor()
-        cur.execute("UPDATE rassilka set dispatch='True' WHERE id=%s", (id,))
-        con.commit()
+        self.execute("UPDATE rassilka set dispatch='True' WHERE id=%s", (id,))
         self.vk.send(user_id=id, message=regdisp,
                      keyboard=self.make_keyboard(id))
 
     def unget_dispatch(self, id):
         """Отвечает за обработку кнопки отключения рассылки"""
-        cur = con.cursor()
-        cur.execute("UPDATE rassilka set dispatch='False' WHERE id=%s", (id,))
-        con.commit()
+        self.execute("UPDATE rassilka set dispatch='False' WHERE id=%s", (id,))
         self.vk.send(user_id=id, message=unregdisp,
                      keyboard=self.make_keyboard(id))
 
     def get_changes(self, id):
         """Отвечает за кнопку подключения изменений"""
-        cur = con.cursor()
-        cur.execute("UPDATE rassilka set changes='True' WHERE id=%s", (id,))
-        con.commit()
+        self.execute("UPDATE rassilka set changes='True' WHERE id=%s", (id,))
         self.vk.send(user_id=id, message=regchanges,
                      keyboard=self.make_keyboard(id))
 
@@ -258,7 +244,6 @@ class Bot:
         """Отвечает за кноку отключения изменений"""
         cur = con.cursor()
         cur.execute("UPDATE rassilka set changes='False' WHERE id=%s", (id,))
-        con.commit()
         self.vk.send(user_id=id, message=unregchanges,
                      keyboard=self.make_keyboard(id))
 
@@ -301,11 +286,9 @@ class Bot:
                     self.choose_way(str(id), str(message))
                     time.sleep(1)
 
-            except urllib3.exception.ProtocolError:
-                time.sleep(5)
-
-            except Exception as e:
+            except:
                 traceback.print_exc()
+                time.sleep(5)
 
 
 if __name__ == '__main__':
